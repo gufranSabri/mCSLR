@@ -143,18 +143,20 @@ def build_scheduler(
         - scheduler: scheduler object,
         - scheduler_step_at: either "validation" or "epoch"
     """
-    scheduler_name = config["scheduler"].lower()
+    scheduler_name = config["name"].lower()
+    patience = config["patience"]
+    factor = config["factor"]
+
 
     if scheduler_name == "plateau":
         # learning rate scheduler
         return (
             lr_scheduler.ReduceLROnPlateau(
                 optimizer=optimizer,
-                mode=scheduler_mode,
-                verbose=False,
-                threshold_mode="abs",
-                factor=config.get("decrease_factor", 0.1),
-                patience=config.get("patience", 10),
+                mode="min",
+                # threshold_mode="abs",
+                factor=factor,
+                patience=patience,
             ),
             "validation",
         )

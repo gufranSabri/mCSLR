@@ -10,9 +10,10 @@ from itertools import groupby
 import torch
 import torch.nn as nn
 import tensorflow as tf
+import torch.nn.functional as F
 
-from modules.tokenizer import GlossTokenizer_S2G
-from modules.visualhead import VisualHead
+from utils.tokenizer import GlossTokenizer_S2G
+from model_components.visualhead import VisualHead
 
 def ctc_decode_func(tf_gloss_logits, input_lengths, beam_size):
     ctc_decode, _ = tf.nn.ctc_beam_search_decoder(
@@ -37,6 +38,15 @@ def ctc_decode_func(tf_gloss_logits, input_lengths, beam_size):
     return decoded_gloss_sequences
 
 
+def contrastive_loss(logits: torch.Tensor) -> torch.Tensor:
+    return nn.functional.cross_entropy(logits, torch.arange(len(logits), device=logits.device))
+
+def clip_loss(similarity: torch.Tensor) -> torch.Tensor:
+    caption_loss = contrastive_loss(similarity)
+    image_loss = contrastive_loss(similarity.t())
+    return (caption_loss + image_loss) / 2.0
+
+
 class PositionalEncoding(nn.Module):
     def __init__(self, channel, joint_num, time_len):
         super(PositionalEncoding, self).__init__()
@@ -58,11 +68,10 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        # nctv
         x = x + self.pe[:, :, :x.size(2)]
         return x
     
-class LangToken(nn.Module):
+class LanguageToken(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
         self.token = nn.Parameter(torch.randn(1, hidden_size))
@@ -297,13 +306,15 @@ class Recognition(nn.Module):
 
         self.right_visual_head = VisualHead(cls_num=len(self.gloss_tokenizer), **cfg['right_visual_head'])
         self.pre_right_proj = nn.Linear(cfg['right_visual_head']['input_size'], self.hidden_size)
+
+        self.logit_scale = nn.Parameter(torch.tensor(2.6592))
+
+        self.lang_tokens = nn.ModuleDict({
+            dataset: LanguageToken(hidden_size=self.hidden_size) for dataset in args.datasets
+        })
         
         self.slr_loss = torch.nn.CTCLoss(blank=0, zero_infinity=True, reduction='sum')
         self.kld = torch.nn.KLDivLoss(reduction="batchmean")
-
-        self.lang_tokens = nn.ModuleDict({
-            dataset: LangToken(hidden_size=self.hidden_size) for dataset in args.datasets
-        })
 
     def compute_recognition_loss(self, gloss_labels, gloss_lengths, gloss_probabilities_log, input_lengths):
         loss = self.slr_loss(
@@ -328,6 +339,17 @@ class Recognition(nn.Module):
             beam_size=beam_size
         )
         return decoded_gloss_sequences
+
+    def contrastive_loss(self, visual_embs, text_embs):
+        image_embeds = visual_embs.mean(1)  # global pooling
+        
+        image_embeds = F.normalize(image_embeds, dim=-1)
+        text_embeds = F.normalize(text_embs, dim=-1)
+
+        logit_scale = self.logit_scale.exp()
+        logits_per_text = torch.matmul(text_embeds, image_embeds.t()) * logit_scale
+
+        return clip_loss(logits_per_text)
 
     def process_pre_head(self, x, proj, datasets):
         res = []
@@ -405,5 +427,10 @@ class Recognition(nn.Module):
             student_log_prob = outputs[f'{student}_gloss_probabilities_log']
             outputs[f'{student}_distill_loss'] = self.kld(input=student_log_prob, target=teacher_prob)
             outputs['loss'] += outputs[f'{student}_distill_loss']
+
+        outputs['loss'] += self.contrastive_loss(body_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
+        outputs['loss'] += self.contrastive_loss(fuse_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
+        outputs['loss'] += self.contrastive_loss(right_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
+        outputs['loss'] += self.contrastive_loss(left_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
 
         return outputs

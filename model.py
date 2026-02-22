@@ -4,7 +4,7 @@ https://github.com/sutwangyan/MSKA
 """
 
 import torch
-from modules.recognition import Recognition
+from model_components.recognition import Recognition
 
 class SLR_Model(torch.nn.Module):
     def __init__(self, cfg, args):
@@ -27,7 +27,3 @@ class SLR_Model(torch.nn.Module):
             beam_size=beam_size,
             input_lengths=input_lengths
         )
-    
-
-{'ensemble_last_gls_hyp': 'ein-paar-tage rhein-pfalz 盖章 偷 盖章 steigen 盖章 k 其实 noch schnee-auf-berg noch streifen 签名 欢迎 trotzdem 后果 欢迎 后果 kreisen endlich pro verlaufen zweihundert verlaufen c verlaufen 生命 verlaufen 表情 充分', 
- 'gls_ref': '政府 改革 人 废 变 少 一样 还 重复 房间 机器 房间 变 少'}

@@ -6,7 +6,7 @@ import torch
 import torch.utils.data.dataset as Dataset
 from torch.utils.data import DataLoader
 
-from modules.tokenizer import GlossTokenizer_S2G
+from utils.tokenizer import GlossTokenizer_S2G
 
 def setup_dataloaders(args, config, phase='train'):
     dataset = CombinedDataset(args.data_path, datasets=config['datasets'], phase=phase)
@@ -43,6 +43,7 @@ class CombinedDataset(Dataset.Dataset):
 
     def prepare_dataset(self, data_path):
         self.list, self.dataset_map, self.data = [], [], {}
+        self.gloss_embs = {}
         for dataset in self.datasets:
             path = f"{data_path}/{dataset}/pose.{self.phase}"
         
@@ -53,23 +54,30 @@ class CombinedDataset(Dataset.Dataset):
                 self.dataset_map.extend([dataset for _ in temp_list])
                 self.data.update(loaded_object)
 
+            emb_path = f"{data_path}/{dataset}/gloss_{dataset}.{self.phase}"
+            with open(emb_path, "rb") as f:
+                loaded_object = pickle.load(f)
+                self.gloss_embs.update(loaded_object)
+
     def __len__(self):
         return len(self.data)
 
-    def augment_preprocess_inputs(self, is_train, keypoints=None):
-        if is_train == 'train':
-            keypoints[:, 0, :, :] /= self.w
-            keypoints[:, 1, :, :] = self.h - keypoints[:, 1, :, :]
-            keypoints[:, 1, :, :] /= self.h
-            keypoints[:, :2, :, :] = (keypoints[:, :2, :, :] - 0.5) / 0.5
-            keypoints[:, :2, :, :] = self.random_move(
-                keypoints[:, :2, :, :].permute(0, 2, 3, 1).numpy()).permute(0, 3, 1, 2)
-        else:
-            keypoints[:, 0, :, :] /= self.w
-            keypoints[:, 1, :, :] = self.h - keypoints[:, 1, :, :]
-            keypoints[:, 1, :, :] /= self.h
-            keypoints[:, :2, :, :] = (keypoints[:, :2, :, :] - 0.5) / 0.5
-        return keypoints
+    def augment_preprocess_inputs(self, is_train, keypoints=None, datasets=None):
+        for i in range(len(datasets)):
+            self.w, self.h = self.d2wh_map[datasets[i]]
+            if is_train == 'train':
+                keypoints[i:i+1, 0, :, :] /= self.w
+                keypoints[i:i+1, 1, :, :] = self.h - keypoints[i:i+1, 1, :, :]
+                keypoints[i:i+1, 1, :, :] /= self.h
+                keypoints[i:i+1, :2, :, :] = (keypoints[i:i+1, :2, :, :] - 0.5) / 0.5
+                keypoints[i:i+1, :2, :, :] = self.random_move(
+                    keypoints[i:i+1, :2, :, :].permute(0, 2, 3, 1).numpy()).permute(0, 3, 1, 2)
+            else:
+                keypoints[i:i+1, 0, :, :] /= self.w
+                keypoints[i:i+1, 1, :, :] = self.h - keypoints[i:i+1, 1, :, :]
+                keypoints[i:i+1, 1, :, :] /= self.h
+                keypoints[i:i+1, :2, :, :] = (keypoints[i:i+1, :2, :, :] - 0.5) / 0.5
+            return keypoints
 
     def rotate_points(self, points, angle):
         center = [0, 0]
@@ -142,17 +150,17 @@ class CombinedDataset(Dataset.Dataset):
         gloss = sample['gloss']
         length = sample['num_frames']
         dataset = self.dataset_map[index]
-        self.w, self.h = self.d2wh_map[dataset]
+        gloss_emb = self.gloss_embs[key]
         
         keypoint = sample['keypoint'].permute(2, 0, 1).to(torch.float32)
         name_sample = sample['name']
 
-        return name_sample, keypoint, gloss, length, dataset
+        return name_sample, keypoint, gloss, gloss_emb, length, dataset
     
     def collate_fn(self, batch):
-        tgt_batch, keypoint_batch, src_length_batch, name_batch, datasets = [], [], [], [], []
+        tgt_batch, keypoint_batch, src_length_batch, name_batch, datasets, gloss_emb_batch = [], [], [], [], [], []
 
-        for name_sample, keypoint_sample, tgt_sample, length, dataset in batch:
+        for name_sample, keypoint_sample, tgt_sample, gloss_emb, length, dataset in batch:
             index, valid_len = self.get_selected_index(length)
             if keypoint_sample is not None:
                 keypoint_batch.append(torch.stack([keypoint_sample[:, i, :] for i in index], dim=1))
@@ -161,7 +169,8 @@ class CombinedDataset(Dataset.Dataset):
             name_batch.append(name_sample)
             tgt_batch.append(tgt_sample)
             datasets.append(dataset)
-        
+            gloss_emb_batch.append(gloss_emb.mean(dim=1).squeeze(0))
+
         max_length = max(src_length_batch)
         padded_sgn_keypoints, keypoint_feature = [], []
         
@@ -175,11 +184,11 @@ class CombinedDataset(Dataset.Dataset):
                 padded_sgn_keypoints.append(keypoints)
 
         keypoints = torch.stack(padded_sgn_keypoints, dim=0)
-        keypoints = self.augment_preprocess_inputs(self.phase, keypoints)
+        keypoints = self.augment_preprocess_inputs(self.phase, keypoints, datasets)
         src_length_batch = torch.tensor(src_length_batch)
         new_src_lengths = (((src_length_batch - 1) / 2) + 1).long()
         new_src_lengths = (((new_src_lengths - 1) / 2) + 1).long()
-
+        
         # gloss_lgt, gloss_ids = [], []
         # for i, tgt in enumerate(tgt_batch):
         #     tgt = [tgt]
@@ -208,14 +217,15 @@ class CombinedDataset(Dataset.Dataset):
         src_input['gloss_input'] = gloss_input
         src_input['src_length'] = src_length_batch
         src_input['datasets'] = datasets
+        src_input['gloss_embs'] = torch.stack(gloss_emb_batch, dim=0)
 
         return src_input
 
 
 
 if __name__ == "__main__":
-    dataset = CombinedDataset(data_path="/Users/gufran/Developer/data/sign")
-    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=dataset.collate_fn)
+    dataset = CombinedDataset(data_path="/home/ahmedubc/projects/aip-lsigal/ahmedubc/datasets")
+    loader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=dataset.collate_fn)
 
     for i, batch in enumerate(loader):
         print("Name", batch['name'])
@@ -225,6 +235,7 @@ if __name__ == "__main__":
         print("New LGT", batch['new_src_lengths'])
         print("Gloss LGT", batch['gloss_input']['gls_lengths'])
         print("GLoss Labels", batch['gloss_input']['gloss_labels'])
+        print("Gloss Embs", batch['gloss_embs'].shape)
         print("LGT", batch['src_length'])
         print("=="*50)
 

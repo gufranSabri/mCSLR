@@ -1,6 +1,4 @@
 import os
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-
 import shutil
 import time
 import yaml
@@ -13,13 +11,14 @@ from collections import defaultdict
 
 import torch
 from dataset import setup_dataloaders
+import torch.optim as optim
 
 from model import SLR_Model
-from modules.metrics import wer_list
-from modules.parser import get_args_parser
-from modules.logger import Logger
-from modules.optimizer import build_optimizer, build_scheduler
-from modules.phoenix_cleanup import clean_phoenix_2014_trans, clean_phoenix_2014
+from utils.metrics import wer_list
+from utils.parser import get_args_parser
+from utils.logger import Logger
+from utils.optimizer import build_scheduler
+from utils.phoenix_cleanup import clean_phoenix_2014_trans, clean_phoenix_2014
 
 def set_rng_state(seed):
     torch.backends.cudnn.benchmark = False
@@ -29,7 +28,7 @@ def set_rng_state(seed):
     np.random.seed(seed)
     random.seed(seed)
 
-def single_loop(model, tokenizer, loader, optimizer, logger, train=True, epoch=None):
+def single_loop(model, tokenizer, loader, optimizer, logger, train=True, epoch=None, slurm_mode=True):
     if train: model.train()
     else: model.eval()
     
@@ -37,22 +36,36 @@ def single_loop(model, tokenizer, loader, optimizer, logger, train=True, epoch=N
     evaluation_results = {}
     eval_results = defaultdict(dict)
     
-    for i, (src_input) in tqdm(enumerate(loader), total=len(loader), ncols=100, desc=f"{'Training' if train else 'Evaluating'} Epoch {epoch}"):
-    # for i, (src_input) in enumerate(loader):
+    if not slurm_mode:
+        loader = tqdm(loader, total=len(loader), ncols=100, leave=False)
+
+    for i, (src_input) in enumerate(loader):
+        optimizer.zero_grad()
         with torch.set_grad_enabled(model.training):
             output = model(src_input)
 
         if train:
-            optimizer.zero_grad()
             output['total_loss'].backward()
+
+            # print gradient for each parameter
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         logger(f"Gradient for {name}: {param.grad.norm().item():.4f}")
+            #     else:
+            #         logger(f"Gradient for {name} is None")
+
+            # exit()
+
             optimizer.step()
-            model.zero_grad()
 
             loss_value = output['total_loss'].item()
             total_loss += loss_value
             if torch.isnan(output['total_loss']) or torch.isinf(output['total_loss']):
                 logger("Loss is {}, stopping training".format(loss_value))
                 continue
+
+            if not slurm_mode:
+                loader.set_postfix_str(f"Loss: {loss_value:.4f}")
 
         else:
             for k, gls_logits in output.items():
@@ -70,92 +83,164 @@ def single_loop(model, tokenizer, loader, optimizer, logger, train=True, epoch=N
                     eval_results[name]['gls_ref'] = gls_ref
                     eval_results[name]['dataset'] = dataset
 
-        
-
     if not train:
-        evaluation_results['wer'] = 200
+        pred_logger = Logger(file_path=os.path.join(args.work_dir, "preds", f"predictions_epoch_{epoch}.log"))
         for hyp_name in eval_results[name].keys():
             if not 'gls_hyp' in hyp_name: continue
 
-            gls_ref, gls_hyp = [], []
+            pred_logger(f"\n=== Evaluating {hyp_name} ===\n", console_print=False)
+
+            gls_ref, gls_hyp = {dataset:[] for dataset in args.datasets}, {dataset:[] for dataset in args.datasets}
             for name in eval_results:
                 dataset = eval_results[name]['dataset']
                 ref = eval_results[name]['gls_ref']
                 hyp = eval_results[name][hyp_name]
 
-                if dataset.lower() == 'phoenix-2014t':
-                    ref = clean_phoenix_2014_trans(ref)
-                    hyp = clean_phoenix_2014_trans(hyp)
+                if dataset.lower() == 'phoenix2014-t':
+                    ref = clean_phoenix_2014_trans(ref).lower()
+                    hyp = clean_phoenix_2014_trans(hyp).lower()
                 elif dataset.lower() == 'phoenix-2014':
-                    ref = clean_phoenix_2014(ref)
-                    hyp = clean_phoenix_2014(hyp)
+                    ref = clean_phoenix_2014(ref).lower()
+                    hyp = clean_phoenix_2014(hyp).lower()
 
-                gls_ref.append(ref)
-                gls_hyp.append(hyp)
+                gls_ref[dataset].append(ref)
+                gls_hyp[dataset].append(hyp)
 
-            wer_results = wer_list(hypotheses=gls_hyp, references=gls_ref)
-            evaluation_results[hyp_name.replace('gls_hyp', '') + 'wer_list'] = wer_results
-            evaluation_results['wer'] = min(wer_results['wer'], evaluation_results['wer'])
+                pred_logger(f"Ref: {ref}\nHyp: {hyp}\n", console_print=False)
 
-    return total_loss / len(loader) if train else evaluation_results['wer']
+            for dataset in args.datasets:
+                wer_results = wer_list(hypotheses=gls_hyp[dataset], references=gls_ref[dataset])
+                evaluation_results[hyp_name.replace('gls_hyp', '') + f'{dataset}_wer_list'] = wer_results
+                evaluation_results[dataset] = min(wer_results['wer'], evaluation_results.get(dataset, 1000))
+
+            pred_logger(f"\n==============================\n", console_print=False)
+
+    return total_loss / len(loader) if train else evaluation_results
 
 
 def main(args, config):
     device = torch.device(args.device)
+    checkpoint_path = os.path.join(args.work_dir, "checkpoint_last.pt")
 
     logger = Logger(file_path=os.path.join(args.work_dir, "train.log"))
-    for key, value in vars(args).items():
-        logger(f"{key}: {value}")
+
+    if not args.resume_training:
+        for key, value in vars(args).items():
+            logger(f"{key}: {value}")
     
     train_dataloader = setup_dataloaders(args, config, phase='train')
     dev_dataloader = setup_dataloaders(args, config, phase='dev')
     test_dataloader = setup_dataloaders(args, config, phase='test')
     
-    logger("\n")
-    logger("Datasets loaded successfully.")
-    logger(f"Number of training samples: {len(train_dataloader.dataset)}")
-    logger(f"Number of dev samples: {len(dev_dataloader.dataset)}")
-    logger(f"Number of test samples: {len(test_dataloader.dataset)}\n")
+    if not args.resume_training:
+        logger("\n")
+        logger("Datasets loaded successfully.")
+        logger(f"Number of training samples: {len(train_dataloader.dataset)}")
+        logger(f"Number of dev samples: {len(dev_dataloader.dataset)}")
+        logger(f"Number of test samples: {len(test_dataloader.dataset)}\n")
 
     model = SLR_Model(cfg=config, args=args).to(device)
     if args.mode == 'test':
-        model.load_state_dict(torch.load(os.path.join(args.work_dir, 'best_model.pth'), map_location=args.device))
+        model.load_state_dict(torch.load(os.path.join(args.work_dir, 'best_model.pt'), map_location=args.device))
 
-    optimizer = build_optimizer(config=config['training']['optimization'], model=model)
-    scheduler, scheduler_type = build_scheduler(config=config['training']['optimization'], optimizer=optimizer)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=0.0001,
+        eps=1e-8, 
+        weight_decay=0.01, 
+        betas=(0.9, 0.98)
+    )
+    # scheduler, scheduler_type = build_scheduler(config=config['training']['optimization']['scheduler'], optimizer=optimizer)
+    scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=config['training']['optimization']['scheduler']['step'], 
+        gamma=config['training']['optimization']['scheduler']['factor']
+    )
+    scheduler_type = "epoch"
 
-    logger(f"Model initialized with {sum(p.numel() for p in model.parameters())} parameters.\n")
-    logger(f"Optimizer: {optimizer.__class__.__name__}")
-    logger(f"Scheduler: {scheduler.__class__.__name__} (Type: {scheduler_type})\n")
+    if not args.resume_training:
+        logger(f"Model initialized with {sum(p.numel() for p in model.parameters())/1000000:.2f} million parameters.\n")
+        logger(f"Optimizer: {optimizer.__class__.__name__}")
+        logger(f"Scheduler: {scheduler.__class__.__name__} (Type: {scheduler_type})\n")
 
-    logger(f"Starting {'training' if args.mode == 'train' else 'testing'}...\n")
+    if not args.resume_training: logger(f"Starting {'training' if args.mode == 'train' else 'testing'}...\n")
+    
     best_wer = 1000
-    for epoch in range(args.epochs):
-        scheduler.step()
+    start_epoch = 0
+    patience = config['training']['optimization'].get('patience', 16)
+    if args.mode == 'train' and args.resume_training:
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(
+                f"Resume requested because work directory exists, but checkpoint not found at: {checkpoint_path}"
+            )
+
+        checkpoint = torch.load(checkpoint_path, map_location=args.device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        if scheduler is not None and checkpoint.get('scheduler_state_dict') is not None:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        if 'patience' in checkpoint:
+            patience = checkpoint['patience']
+
+        best_wer = checkpoint.get('best_wer', best_wer)
+        start_epoch = checkpoint.get('epoch', -1) + 1
+        logger(f"Resuming training from checkpoint: {checkpoint_path}")
+        logger(f"Resumed at epoch {start_epoch} with best WER {best_wer:.2f}%\n")
+
+
+    for epoch in range(start_epoch, args.epochs):
+        if scheduler_type == "epoch": scheduler.step()
+        if scheduler_type == "validation": scheduler.step(best_wer)
+        logger(f"Epoch [{epoch}/{args.epochs}] - LR: {optimizer.param_groups[0]['lr']:.6f}")
+
         start_time = time.time()
 
-        # loss = single_loop(
-        #     model, model.net.gloss_tokenizer, 
-        #     train_dataloader, optimizer, logger, 
-        #     train=True, epoch=epoch
-        # )
+        if args.mode == 'train':
+            loss = single_loop(
+                model, model.net.gloss_tokenizer, 
+                train_dataloader, optimizer, logger, 
+                train=True, epoch=epoch, slurm_mode=args.slurm_mode
+            )
 
-        wer = single_loop(
+        wers = single_loop(
             model, model.net.gloss_tokenizer, 
             dev_dataloader, optimizer, logger, 
-            train=False, epoch=epoch
+            train=False, epoch=epoch, slurm_mode=args.slurm_mode
         )
+        avg_wer = sum(wers[dataset] for dataset in args.datasets) / len(args.datasets)
 
-        logger(f"Epoch [{epoch}/{args.epochs}]")
+        
         logger(f" - Loss: {loss:.4f}")
-        logger(f" - WER: {wer:.2f}%")
+        for dataset in args.datasets:
+            logger(f" - {dataset} WER: {wers[dataset]:.2f}%")
+        logger(f" - Average WER: {avg_wer:.2f}%")
         
-        if wer < best_wer:
-            best_wer = wer
+        if avg_wer < best_wer:
+            best_wer = avg_wer
             torch.save(model.state_dict(), os.path.join(args.work_dir, "best_model.pt"))
+            
+            patience = config['training']['optimization'].get('patience', 16)
             logger(f"New best model saved.")
+        else:
+            patience -= 1
+            logger(f"No improvement in WER. Patience reduced to {patience}.")
+
+        torch.save(
+            {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                'best_wer': best_wer,
+                'patience': patience
+            },
+            checkpoint_path,
+        )
         
-        logger(f"Epoch time: {time.time() - start_time:.2f} seconds")
+        logger(f"Epoch time: {((time.time() - start_time)/60):.2f} minutes\n\n")
 
 
 
@@ -172,15 +257,19 @@ if __name__ == '__main__':
     if not os.path.exists("work_dir"): os.makedirs("work_dir")
     if args.mode == 'test': args.epochs = 1
 
-    if args.mode == 'train':
-        os.makedirs(args.work_dir, exist_ok=True)
+    resume_training = args.mode == 'train' and os.path.exists(args.work_dir)
+    args.resume_training = resume_training
 
     if args.mode == 'train':
+        os.makedirs(args.work_dir, exist_ok=True)
+        os.makedirs(os.path.join(args.work_dir, "preds"), exist_ok=True)
+
+    if args.mode == 'train' and not resume_training:
         shutil.copy2(args.config, args.work_dir)
         shutil.copy2("./main.py", args.work_dir)
         shutil.copy2("./dataset.py", args.work_dir)
         shutil.copy2("./model.py", args.work_dir)
-        shutil.copy2("./configs/combined.yaml", args.work_dir)
+        shutil.copy2("./configs/baseline.yaml", args.work_dir)
     
     set_rng_state(42)
     main(args, config)

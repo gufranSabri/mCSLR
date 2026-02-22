@@ -5,9 +5,10 @@ def get_args_parser():
     parser.add_argument('--work-dir', default="work_dir/test")
     parser.add_argument('--mode', default="train")
     parser.add_argument('--batch-size', default=8, type=int)
-    parser.add_argument('--epochs', default=100, type=int)
-    parser.add_argument('--device', default='mps')
+    parser.add_argument('--epochs', default=60, type=int)
+    parser.add_argument('--device', default='cuda')
     parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--config', type=str, default='configs/combined.yaml')
+    parser.add_argument('--config', type=str, default='configs/baseline.yaml')
+    parser.add_argument('--slurm-mode', action='store_true')
 
     return parser

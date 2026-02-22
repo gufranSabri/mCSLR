@@ -33,8 +33,8 @@ for key, value in loaded_object2.items():
         c += 1
 
 # save
-with open("../data/combined/gloss2ids.pkl", "wb") as f:
-    pickle.dump(combined_gloss2ids, f)
+# with open("../data/combined/gloss2ids.pkl", "wb") as f:
+#     pickle.dump(combined_gloss2ids, f)
 
 # check if any keys have same values
 value_to_keys = {}
@@ -52,3 +52,9 @@ print(len(common_keys))
 print(len(loaded_object))
 print(len(loaded_object2))
 print(len(combined_gloss2ids))
+
+
+
+print("\n\n\n\n")
+
+print(combined_gloss2ids)

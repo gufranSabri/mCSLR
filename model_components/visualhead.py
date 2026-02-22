@@ -6,7 +6,7 @@ https://github.com/sutwangyan/MSKA
 
 import torch
 import torch.nn.functional as F
-from modules.utils import PositionalEncoding, MaskedNorm, PositionwiseFeedForward, MLPHead
+from model_components.utils import PositionalEncoding, MaskedNorm, PositionwiseFeedForward, MLPHead
 
 class VisualHead(torch.nn.Module):
     def __init__(self, cls_num, input_size=512, hidden_size=1024, ff_size=2048, ff_kernelsize=[3,3]):
