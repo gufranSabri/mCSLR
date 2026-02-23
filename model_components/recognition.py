@@ -13,6 +13,7 @@ import tensorflow as tf
 import torch.nn.functional as F
 
 from utils.tokenizer import GlossTokenizer_S2G
+from utils.sal import SequenceAlignmentLoss
 from model_components.visualhead import VisualHead
 
 def ctc_decode_func(tf_gloss_logits, input_lengths, beam_size):
@@ -312,9 +313,10 @@ class Recognition(nn.Module):
         self.lang_tokens = nn.ModuleDict({
             dataset: LanguageToken(hidden_size=self.hidden_size) for dataset in args.datasets
         })
-        
+
         self.slr_loss = torch.nn.CTCLoss(blank=0, zero_infinity=True, reduction='sum')
         self.kld = torch.nn.KLDivLoss(reduction="batchmean")
+        self.sal = SequenceAlignmentLoss()
 
     def compute_recognition_loss(self, gloss_labels, gloss_lengths, gloss_probabilities_log, input_lengths):
         loss = self.slr_loss(
@@ -432,5 +434,9 @@ class Recognition(nn.Module):
         outputs['loss'] += self.contrastive_loss(fuse_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
         outputs['loss'] += self.contrastive_loss(right_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
         outputs['loss'] += self.contrastive_loss(left_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
+        outputs['loss'] += body_head['aux_loss'] + fuse_head['aux_loss'] \
+                         + left_head['aux_loss'] + right_head['aux_loss']
+
+        outputs['loss'] += self.sal(fuse_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
 
         return outputs

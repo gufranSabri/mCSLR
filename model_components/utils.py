@@ -151,9 +151,14 @@ class PositionwiseFeedForward(nn.Module):
         if not skip_connection:
             print('Turn off skip_connection in PositionwiseFeedForward')
 
-    def forward(self, x):
+    def forward(self, x, B=None, T=None):
         x_norm = self.layer_norm(x)
+        if len(x.shape)==2:
+            _, D = x.shape
+            x = x.reshape(B, T, D)
+
         x_t = x_norm.transpose(1,2)
+
         x_t = self.pwff_layer(x_t)
         if self.skip_connection:
             return x_t.transpose(1,2)+x

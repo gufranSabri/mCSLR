@@ -2893,7 +2893,7 @@ def get_alignment(r, h, d):
 
 import sacrebleu
 
-from rouge import Rouge
+# from rouge import Rouge
 def bleu(references, hypotheses, level='word'):
     """
     Raw corpus BLEU from sacrebleu (without tokenization)
