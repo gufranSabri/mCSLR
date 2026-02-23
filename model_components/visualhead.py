@@ -30,8 +30,8 @@ class VisualHead(torch.nn.Module):
             input_dim=self.hidden_size, 
             ff_size=ff_size,
             ff_kernelsize=ff_kernelsize, 
-            num_experts=4,
-            top_k=2
+            num_experts=8,
+            top_k=4
 
         )
         

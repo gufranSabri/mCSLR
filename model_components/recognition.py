@@ -438,5 +438,8 @@ class Recognition(nn.Module):
                          + left_head['aux_loss'] + right_head['aux_loss']
 
         outputs['loss'] += self.sal(fuse_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
+        outputs['loss'] += self.sal(body_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
+        outputs['loss'] += self.sal(left_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
+        outputs['loss'] += self.sal(right_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
 
         return outputs
