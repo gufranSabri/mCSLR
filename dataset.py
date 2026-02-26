@@ -101,6 +101,11 @@ class CombinedDataset(Dataset.Dataset):
         points_transformed = points_rotated + center
         return points_transformed
 
+    # def get_selected_index(self, vlen):
+    #     frame_index = np.arange(vlen)
+    #     valid_len = vlen
+    #     return frame_index, valid_len
+
     def get_selected_index(self, vlen):
         if self.tmin == 1 and self.tmax == 1:
             if vlen <= self.clip_len:
@@ -162,8 +167,8 @@ class CombinedDataset(Dataset.Dataset):
         length = sample['num_frames']
         dataset = self.dataset_map[index]
         gloss_emb = self.gloss_embs[key]
-        rgb_ft = torch.tensor(np.load(os.path.join(self.data_dir, dataset, "features", self.phase, self.rgb_fts[key])))
-        
+        rgb_ft = torch.tensor(np.load(self.rgb_fts[key]))
+
         keypoint = sample['keypoint'].permute(2, 0, 1).to(torch.float32)
         name_sample = sample['name']
 
@@ -240,21 +245,25 @@ class CombinedDataset(Dataset.Dataset):
 
 
 if __name__ == "__main__":
-    dataset = CombinedDataset(data_path="/home/ahmedubc/projects/aip-lsigal/ahmedubc/datasets", phase="dev")
+    dataset = CombinedDataset(data_path="/home/ahmedubc/projects/aip-lsigal/ahmedubc/datasets", phase="train")
     loader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=dataset.collate_fn)
 
     for i, batch in enumerate(loader):
         print("Name", batch['name'])
-        print("Keypoint", batch['keypoint'].shape)
-        print("Gloss", batch['gloss'])
-        print("Mask", batch['mask'].shape)
+        # print("Keypoint", batch['keypoint'].shape)
+        # print("Gloss", batch['gloss'])
+        # print("Mask", batch['mask'].shape)
         print("New LGT", batch['new_src_lengths'])
-        print("Gloss LGT", batch['gloss_input']['gls_lengths'])
-        print("GLoss Labels", batch['gloss_input']['gloss_labels'])
-        print("Gloss Embs", batch['gloss_embs'].shape)
+        # print("Gloss LGT", batch['gloss_input']['gls_lengths'])
+        # print("GLoss Labels", batch['gloss_input']['gloss_labels'])
+        # print("Gloss Embs", batch['gloss_embs'].shape)
         print("LGT", batch['src_length'])
         print("RGB FTs", batch['rgb_ft'].shape)
         print("RGB LGT", batch['rgb_lgt'])
+        print("Fuse X", batch['fuse_x'].shape)
+        print("Body X", batch['body_x'].shape)
+        print("Right X", batch['right_x'].shape)
+        print("Left X", batch['left_x'].shape)
         print("=="*50)
 
-        if i == 10:break
+        if i == 5:break

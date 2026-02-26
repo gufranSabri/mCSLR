@@ -20,4 +20,4 @@ pip install --no-index --upgrade pip
 bash ./scripts/install.sh
 
 export PYTHONDONTWRITEBYTECODE=1
-python main.py --work-dir work_dir/v2__step --config ./configs/baseline.yaml --slurm-mode
+python main.py --work-dir work_dir/v5 --config ./configs/baseline.yaml --slurm-mode

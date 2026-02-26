@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from utils.tokenizer import GlossTokenizer_S2G
 from utils.sal import SequenceAlignmentLoss
+from utils.kld import SequenceKLDLoss
 from model_components.visualhead import VisualHead
 
 def ctc_decode_func(tf_gloss_logits, input_lengths, beam_size):
@@ -293,6 +294,8 @@ class Recognition(nn.Module):
         self.input_type = cfg['input_type']
         self.hidden_size = cfg['hidden_size']
         self.gloss_tokenizer = GlossTokenizer_S2G(cfg['GlossTokenizer'])
+
+        self.skld_w = self.args.skld_weight
     
         self.visual_backbone_keypoint = DSTA(cfg=self.cfg['DSTA-Net'], num_channel=3, args=args)
         
@@ -316,6 +319,7 @@ class Recognition(nn.Module):
 
         self.slr_loss = torch.nn.CTCLoss(blank=0, zero_infinity=True, reduction='sum')
         self.kld = torch.nn.KLDivLoss(reduction="batchmean")
+        self.skld = SequenceKLDLoss()
         self.sal = SequenceAlignmentLoss()
 
     def compute_recognition_loss(self, gloss_labels, gloss_lengths, gloss_probabilities_log, input_lengths):
@@ -414,32 +418,50 @@ class Recognition(nn.Module):
 
         outputs = {**head_outputs, 'input_lengths':src_input['new_src_lengths']}
 
-        outputs['loss'] = 0
-        for k in ['left', 'right', 'fuse', 'body']:
-            outputs[f'loss'] += self.compute_recognition_loss(
-                gloss_labels=src_input['gloss_input']['gloss_labels'].to(self.device),
-                gloss_lengths=src_input['gloss_input']['gls_lengths'].to(self.device),
-                gloss_probabilities_log=head_outputs[f'{k}_gloss_probabilities_log'],
-                input_lengths=src_input['new_src_lengths'].to(self.device)
+        if self.training:
+            outputs['loss'] = 0
+            for k in ['left', 'right', 'fuse', 'body']:
+                outputs[f'loss'] += self.compute_recognition_loss(
+                    gloss_labels=src_input['gloss_input']['gloss_labels'].to(self.device),
+                    gloss_lengths=src_input['gloss_input']['gls_lengths'].to(self.device),
+                    gloss_probabilities_log=head_outputs[f'{k}_gloss_probabilities_log'],
+                    input_lengths=src_input['new_src_lengths'].to(self.device)
+                )
+                
+            for student in ['left', 'right', 'fuse', 'body']:
+                teacher_prob = outputs['ensemble_last_gloss_probabilities']
+                teacher_prob = teacher_prob.detach()
+                student_log_prob = outputs[f'{student}_gloss_probabilities_log']
+                outputs[f'{student}_distill_loss'] = self.kld(input=student_log_prob, target=teacher_prob)
+                outputs['loss'] += outputs[f'{student}_distill_loss']
+
+            outputs['loss'] += self.contrastive_loss(body_head['gloss_feature_pre_proj'], src_input['gloss_embs'].to(self.device))
+            outputs['loss'] += self.contrastive_loss(fuse_head['gloss_feature_pre_proj'], src_input['gloss_embs'].to(self.device))
+            outputs['loss'] += self.contrastive_loss(right_head['gloss_feature_pre_proj'], src_input['gloss_embs'].to(self.device))
+            outputs['loss'] += self.contrastive_loss(left_head['gloss_feature_pre_proj'], src_input['gloss_embs'].to(self.device))
+            outputs['loss'] += body_head['aux_loss'] + fuse_head['aux_loss'] + left_head['aux_loss'] + right_head['aux_loss']
+
+            skld_loss = self.skld(
+                fuse_head['gloss_feature'], 
+                src_input['fuse_x'].to(self.device), 
+                src_input['new_src_lengths'].to(self.device)
             )
-            
-        for student in ['left', 'right', 'fuse', 'body']:
-            teacher_prob = outputs['ensemble_last_gloss_probabilities']
-            teacher_prob = teacher_prob.detach()
-            student_log_prob = outputs[f'{student}_gloss_probabilities_log']
-            outputs[f'{student}_distill_loss'] = self.kld(input=student_log_prob, target=teacher_prob)
-            outputs['loss'] += outputs[f'{student}_distill_loss']
+            skld_loss += self.skld(
+                body_head['gloss_feature'], 
+                src_input['body_x'].to(self.device), 
+                src_input['new_src_lengths'].to(self.device)
+            )
+            skld_loss += self.skld(
+                left_head['gloss_feature'], 
+                src_input['left_x'].to(self.device), 
+                src_input['new_src_lengths'].to(self.device)
+            )
+            skld_loss += self.skld(
+                right_head['gloss_feature'], 
+                src_input['right_x'].to(self.device), 
+                src_input['new_src_lengths'].to(self.device)
+            )
 
-        outputs['loss'] += self.contrastive_loss(body_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
-        outputs['loss'] += self.contrastive_loss(fuse_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
-        outputs['loss'] += self.contrastive_loss(right_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
-        outputs['loss'] += self.contrastive_loss(left_head['gloss_feature'], src_input['gloss_embs'].to(self.device))
-        outputs['loss'] += body_head['aux_loss'] + fuse_head['aux_loss'] \
-                         + left_head['aux_loss'] + right_head['aux_loss']
-
-        outputs['loss'] += self.sal(fuse_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
-        outputs['loss'] += self.sal(body_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
-        outputs['loss'] += self.sal(left_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
-        outputs['loss'] += self.sal(right_head['gloss_feature'], src_input['rgb_ft'].to(self.device), src_input['rgb_lgt'].to(self.device))
+            outputs['loss'] += self.skld_w * skld_loss
 
         return outputs

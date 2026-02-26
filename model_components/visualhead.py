@@ -30,13 +30,12 @@ class VisualHead(torch.nn.Module):
             input_dim=self.hidden_size, 
             ff_size=ff_size,
             ff_kernelsize=ff_kernelsize, 
-            num_experts=8,
-            top_k=4
-
+            num_experts=4,
+            top_k=2
         )
-        
         self.layer_norm = torch.nn.LayerNorm(self.hidden_size, eps=1e-6)
-        self.gloss_output_layer = torch.nn.Linear(self.hidden_size, cls_num)
+        self.fc2 = torch.nn.Linear(self.hidden_size, 512)
+        self.gloss_output_layer = torch.nn.Linear(512, cls_num)
 
 
     def forward(self, x, mask, valid_len_in=None):
@@ -53,20 +52,24 @@ class VisualHead(torch.nn.Module):
 
         #feedforward
         x, aux_loss = self.feedforward(x)
+        # x = self.feedforward(x)
         x = self.layer_norm(x)
 
         x = x.transpose(1,2)
         x = x.transpose(1,2)
 
+        xp = self.fc2(x)
+
         #classification
-        logits = self.gloss_output_layer(x) #B,T,V
+        logits = self.gloss_output_layer(xp) #B,T,V
         gloss_probabilities_log = logits.log_softmax(2) 
         gloss_probabilities = logits.softmax(2)
 
         valid_len_out = valid_len_in
 
         return {
-            'gloss_feature': x,
+            'gloss_feature_pre_proj': x,
+            'gloss_feature': xp,
             'gloss_feature_norm': F.normalize(x, dim=-1),
             'gloss_logits':logits, 
             'gloss_probabilities_log':gloss_probabilities_log,

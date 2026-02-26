@@ -17,7 +17,9 @@ class SLR_Model(torch.nn.Module):
     def forward(self, src_input):
         recognition_outputs = self.net(src_input)
         model_outputs = {**recognition_outputs}
-        model_outputs['total_loss'] = recognition_outputs['loss']
+
+        if self.training:
+            model_outputs['total_loss'] = recognition_outputs['loss']
 
         return model_outputs
 

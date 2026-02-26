@@ -15,6 +15,7 @@ import torch
 from dataset import setup_dataloaders
 import torch.optim as optim
 
+from mska_og.model import SignLanguageModel
 from model import SLR_Model
 from utils.metrics import wer_list
 from utils.parser import get_args_parser
@@ -30,7 +31,7 @@ def set_rng_state(seed):
     np.random.seed(seed)
     random.seed(seed)
 
-def single_loop(model, tokenizer, loader, optimizer, logger, train=True, epoch=None, slurm_mode=True):
+def single_loop(model, tokenizer, teacher_models, loader, optimizer, logger, train=True, epoch=None, slurm_mode=True):
     if train: model.train()
     else: model.eval()
     
@@ -43,21 +44,30 @@ def single_loop(model, tokenizer, loader, optimizer, logger, train=True, epoch=N
 
     for i, (src_input) in enumerate(loader):
         optimizer.zero_grad()
+
+        if train:
+            teacher_outputs = {}
+            with torch.no_grad():
+                for dataset in args.datasets:
+                    teacher_outputs[dataset] = teacher_models[dataset](src_input)
+
+            fuse_x, body_x, left_x, right_x = [], [], [], []
+            for i, dataset in enumerate(src_input['datasets']):
+                fuse_x.append(teacher_outputs[dataset][0][i:i+1])
+                body_x.append(teacher_outputs[dataset][1][i:i+1])
+                left_x.append(teacher_outputs[dataset][2][i:i+1])
+                right_x.append(teacher_outputs[dataset][3][i:i+1])
+
+            src_input['fuse_x'] = torch.cat(fuse_x, dim=0).to(args.device)
+            src_input['body_x'] = torch.cat(body_x, dim=0).to(args.device)
+            src_input['right_x'] = torch.cat(left_x, dim=0).to(args.device)
+            src_input['left_x'] = torch.cat(right_x, dim=0).to(args.device)
+
         with torch.set_grad_enabled(model.training):
             output = model(src_input)
 
         if train:
             output['total_loss'].backward()
-
-            # print gradient for each parameter
-            # for name, param in model.named_parameters():
-            #     if param.grad is not None:
-            #         logger(f"Gradient for {name}: {param.grad.norm().item():.4f}")
-            #     else:
-            #         logger(f"Gradient for {name} is None")
-
-            # exit()
-
             optimizer.step()
 
             loss_value = output['total_loss'].item()
@@ -140,6 +150,24 @@ def main(args, config):
         logger(f"Number of training samples: {len(train_dataloader.dataset)}")
         logger(f"Number of dev samples: {len(dev_dataloader.dataset)}")
         logger(f"Number of test samples: {len(test_dataloader.dataset)}\n")
+    
+
+    teacher_models = {}
+    for dataset in args.datasets:
+        with open(f"mska_og/configs/{dataset}.yaml", 'r+', encoding='utf-8') as f:
+            config_temp = yaml.load(f, Loader=yaml.FullLoader)
+        teacher_models[dataset] = SignLanguageModel(cfg=config_temp, args=args).to(device)
+
+        weight_path = f"mska_og/ckpt/{dataset}.pth"
+        msg = teacher_models[dataset].load_state_dict(torch.load(weight_path, map_location=args.device)["model"])
+
+        if not args.resume_training:
+            logger(f"Teacher model for {dataset} loaded successfully from {weight_path}. MSG: {msg}")
+
+        for param in teacher_models[dataset].parameters():
+            param.requires_grad = False
+
+    if not args.resume_training: logger("\n")
 
     model = SLR_Model(cfg=config, args=args).to(device)
     if args.mode == 'test':
@@ -210,26 +238,27 @@ def main(args, config):
     for epoch in range(start_epoch, args.epochs):
         if scheduler_type == "epoch": scheduler.step()
         if scheduler_type == "validation": scheduler.step(best_wer)
-        logger(f"Epoch [{epoch}/{args.epochs}] - LR: {optimizer.param_groups[0]['lr']:.6f}")
+        logger(f"Epoch [{epoch+1}/{args.epochs}] - LR: {optimizer.param_groups[0]['lr']:.6f}")
 
         start_time = time.time()
 
         if args.mode == 'train':
             loss = single_loop(
                 model, model.net.gloss_tokenizer, 
+                teacher_models,
                 train_dataloader, optimizer, logger, 
                 train=True, epoch=epoch, slurm_mode=args.slurm_mode
             )
+            logger(f" - Loss: {loss:.4f}")
 
         wers = single_loop(
             model, model.net.gloss_tokenizer, 
+            teacher_models,
             dev_dataloader, optimizer, logger, 
             train=False, epoch=epoch, slurm_mode=args.slurm_mode
         )
         avg_wer = sum(wers[dataset] for dataset in args.datasets) / len(args.datasets)
 
-        
-        logger(f" - Loss: {loss:.4f}")
         for dataset in args.datasets:
             logger(f" - {dataset} WER: {wers[dataset]:.2f}%")
         logger(f" - Average WER: {avg_wer:.2f}%")
@@ -286,6 +315,8 @@ if __name__ == '__main__':
         shutil.copy2("./dataset.py", args.work_dir)
         shutil.copy2("./model.py", args.work_dir)
         shutil.copy2("./configs/baseline.yaml", args.work_dir)
+        shutil.copytree("./model_components", os.path.join(args.work_dir, "model_components"))
+        
     
     set_rng_state(42)
     main(args, config)

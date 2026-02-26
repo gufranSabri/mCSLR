@@ -21,7 +21,7 @@ bash ./scripts/install.sh
 
 # Timestamp for unique work directory
 timestamp=$(date +"%d_%H_%M_%S")
-work_dir="./work_dir/v2__${timestamp}"
+work_dir="./work_dir/v5__${timestamp}"
 
 export PYTHONDONTWRITEBYTECODE=1
 python main.py --work-dir "$work_dir" --config ./configs/baseline.yaml --slurm-mode
